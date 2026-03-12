@@ -1,0 +1,292 @@
+{
+  "name": "AI Onboarding Automation - Full Workflow",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "new-hire-intake",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "node-001",
+      "name": "Webhook - New Hire Intake",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [200, 300],
+      "notes": "TRIGGER: Receives new hire form submission or HRIS webhook. Accepts POST request with new hire JSON data."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Step 1: Validate required fields from intake payload\nconst data = $input.first().json;\n\nconst requiredFields = [\n  'full_name',\n  'personal_email', \n  'job_title',\n  'department',\n  'start_date',\n  'manager_name'\n];\n\nconst missingFields = requiredFields.filter(field => !data[field] || data[field] === '');\nconst validationScore = ((requiredFields.length - missingFields.length) / requiredFields.length) * 100;\n\nreturn [{\n  json: {\n    ...data,\n    validation_passed: validationScore >= 85,\n    validation_score: validationScore,\n    missing_required_fields: missingFields,\n    intake_timestamp: new Date().toISOString(),\n    record_id: `ONB-${Date.now()}`\n  }\n}];"
+      },
+      "id": "node-002",
+      "name": "Validate Intake Record",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [420, 300],
+      "notes": "Checks all required fields are present. Calculates validation score."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.validation_passed }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "node-003",
+      "name": "Route: Valid or Needs Review?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [640, 300],
+      "notes": "TRUE path = valid record, proceed to AI extraction. FALSE path = send to HR review queue."
+    },
+    {
+      "parameters": {
+        "channel": "#hr-onboarding-alerts",
+        "text": "=⚠️ *Onboarding Record Needs Review*\n\nRecord ID: {{ $json.record_id }}\nNew Hire: {{ $json.full_name || 'Unknown' }}\nValidation Score: {{ $json.validation_score }}%\nMissing Fields: {{ $json.missing_required_fields.join(', ') }}\n\nPlease review and complete the intake form before processing continues.",
+        "options": {}
+      },
+      "id": "node-004",
+      "name": "Slack - HR Review Alert",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2,
+      "position": [860, 480],
+      "notes": "Sends Slack alert to HR team when validation fails. Workflow stops here for flagged records."
+    },
+    {
+      "parameters": {
+        "model": "gpt-4o",
+        "messages": {
+          "values": [
+            {
+              "role": "system",
+              "content": "You are an onboarding operations assistant for an enterprise HR team. Extract structured data from employee intake records and return ONLY valid JSON. No commentary. No markdown. No explanation."
+            },
+            {
+              "role": "user",
+              "content": "=Extract onboarding fields from this intake record.\n\nEmployee intake data:\n{{ JSON.stringify($json, null, 2) }}\n\nReturn valid JSON with exactly these fields:\n- full_name (string)\n- personal_email (string)\n- company_email (string or null)\n- job_title (string)\n- department (string)\n- office_location (string or null)\n- manager_name (string)\n- manager_email (string or null)\n- employment_type (full-time | part-time | contractor)\n- start_date (ISO 8601 format)\n- required_systems (array of strings)\n- missing_documents (array of strings, empty array if none)\n- review_flags (array of issue descriptions, empty array if none)\n\nRules: Set null for any field you cannot determine. Never guess or infer. Flag any data conflicts in review_flags."
+            }
+          ]
+        },
+        "options": {
+          "temperature": 0.1,
+          "response_format": {
+            "type": "json_object"
+          }
+        }
+      },
+      "id": "node-005",
+      "name": "AI - Extract and Normalize Fields",
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 1,
+      "position": [860, 200],
+      "notes": "GPT-4o extracts and normalizes all onboarding fields. Returns structured JSON."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Step 3: Parse AI output and enrich with role-based onboarding track\nconst aiOutput = $input.first().json;\nlet extracted;\n\ntry {\n  // Handle both direct JSON and nested message format\n  if (aiOutput.choices && aiOutput.choices[0]) {\n    extracted = JSON.parse(aiOutput.choices[0].message.content);\n  } else {\n    extracted = aiOutput;\n  }\n} catch(e) {\n  extracted = aiOutput;\n}\n\n// Role-based onboarding tracks\nconst departmentTracks = {\n  'Engineering': {\n    tools: ['GitHub', 'Jira', 'Slack', 'VS Code', 'AWS Console'],\n    training: ['Security & Compliance', 'Code Review Standards', 'Architecture Overview', 'Dev Environment Setup'],\n    priority_tasks: ['Set up dev environment', 'Join engineering Slack channels', 'Complete security training', 'Meet with tech lead']\n  },\n  'Sales': {\n    tools: ['Salesforce CRM', 'Outreach', 'LinkedIn Sales Navigator', 'Slack', 'Zoom'],\n    training: ['Product Demo Certification', 'Sales Methodology', 'CRM Training', 'Compliance Training'],\n    priority_tasks: ['Complete CRM setup', 'Shadow 3 sales calls', 'Review sales playbook', 'Meet with account executives']\n  },\n  'HR': {\n    tools: ['BambooHR', 'Slack', 'Google Workspace', 'DocuSign', 'Notion'],\n    training: ['HRIS Training', 'Compliance & Privacy', 'Benefits Administration', 'Recruitment Process'],\n    priority_tasks: ['Complete HRIS access setup', 'Review HR policies', 'Meet HR team members', 'Complete compliance training']\n  },\n  'default': {\n    tools: ['Slack', 'Google Workspace', 'Notion', 'Zoom'],\n    training: ['Company Overview', 'Security & Compliance', 'Tool Access Training'],\n    priority_tasks: ['Complete system access setup', 'Review company handbook', 'Attend orientation', 'Meet your team']\n  }\n};\n\nconst dept = extracted.department || 'default';\nconst track = departmentTracks[dept] || departmentTracks['default'];\n\nreturn [{\n  json: {\n    ...extracted,\n    onboarding_track: track,\n    profile_enriched_at: new Date().toISOString(),\n    status: 'profile_ready',\n    record_id: $('Validate Intake Record').first().json.record_id\n  }\n}];"
+      },
+      "id": "node-006",
+      "name": "Enrich Profile with Role Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1080, 200],
+      "notes": "Merges AI-extracted data with department-specific onboarding track (tools, training, priorities)."
+    },
+    {
+      "parameters": {
+        "operation": "create",
+        "baseId": "YOUR_AIRTABLE_BASE_ID",
+        "tableId": "Onboarding Records",
+        "fields": {
+          "fieldMappings": [
+            { "fieldId": "Record ID", "fieldValue": "={{ $json.record_id }}" },
+            { "fieldId": "Full Name", "fieldValue": "={{ $json.full_name }}" },
+            { "fieldId": "Personal Email", "fieldValue": "={{ $json.personal_email }}" },
+            { "fieldId": "Job Title", "fieldValue": "={{ $json.job_title }}" },
+            { "fieldId": "Department", "fieldValue": "={{ $json.department }}" },
+            { "fieldId": "Start Date", "fieldValue": "={{ $json.start_date }}" },
+            { "fieldId": "Manager Name", "fieldValue": "={{ $json.manager_name }}" },
+            { "fieldId": "Employment Type", "fieldValue": "={{ $json.employment_type }}" },
+            { "fieldId": "Office Location", "fieldValue": "={{ $json.office_location }}" },
+            { "fieldId": "Status", "fieldValue": "={{ $json.status }}" }
+          ]
+        }
+      },
+      "id": "node-007",
+      "name": "Airtable - Create Onboarding Record",
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2,
+      "position": [1300, 200],
+      "notes": "Stores the confirmed onboarding profile in Airtable as the central source of truth."
+    },
+    {
+      "parameters": {
+        "model": "gpt-4o",
+        "messages": {
+          "values": [
+            {
+              "role": "system",
+              "content": "You are an onboarding experience designer. Create personalized, practical onboarding plans. Return ONLY valid JSON."
+            },
+            {
+              "role": "user",
+              "content": "=Create a personalized onboarding plan for this new employee.\n\nEmployee profile:\nName: {{ $json.full_name }}\nRole: {{ $json.job_title }}\nDepartment: {{ $json.department }}\nLocation: {{ $json.office_location }}\nManager: {{ $json.manager_name }}\nStart Date: {{ $json.start_date }}\nEmployment Type: {{ $json.employment_type }}\nRecommended Tools: {{ JSON.stringify($json.onboarding_track.tools) }}\nRequired Training: {{ JSON.stringify($json.onboarding_track.training) }}\n\nReturn JSON with this exact structure:\n{\n  \"welcome_message\": \"2-3 sentence personalized welcome specific to their role\",\n  \"day_one_agenda\": [\"list of day 1 items\"],\n  \"week_one_priorities\": [\"5-7 role-specific priorities\"],\n  \"required_training\": [{\"module\": \"\", \"duration\": \"\", \"deadline\": \"\"}],\n  \"key_contacts\": [{\"name\": \"\", \"role\": \"\", \"reason\": \"\"}],\n  \"recommended_tools\": [\"tools to set up on day 1\"],\n  \"resources\": [\"documents or links to review in week 1\"]\n}\n\nMake everything specific to this role and department. Avoid generic advice."
+            }
+          ]
+        },
+        "options": {
+          "temperature": 0.4,
+          "response_format": {
+            "type": "json_object"
+          }
+        }
+      },
+      "id": "node-008",
+      "name": "AI - Generate Onboarding Plan",
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 1,
+      "position": [1520, 200],
+      "notes": "GPT-4o generates a role-specific personalized onboarding plan."
+    },
+    {
+      "parameters": {
+        "model": "gpt-4o",
+        "messages": {
+          "values": [
+            {
+              "role": "system",
+              "content": "You are an HR assistant. Write concise, professional manager briefing notes in plain text with section headers. Keep under 250 words."
+            },
+            {
+              "role": "user",
+              "content": "=Write a manager briefing note for the hiring manager about their incoming team member.\n\nNew hire: {{ $('Enrich Profile with Role Data').first().json.full_name }}\nRole: {{ $('Enrich Profile with Role Data').first().json.job_title }}\nDepartment: {{ $('Enrich Profile with Role Data').first().json.department }}\nStart Date: {{ $('Enrich Profile with Role Data').first().json.start_date }}\nEmployment Type: {{ $('Enrich Profile with Role Data').first().json.employment_type }}\nLocation: {{ $('Enrich Profile with Role Data').first().json.office_location }}\nRecord ID: {{ $('Enrich Profile with Role Data').first().json.record_id }}\n\nInclude these sections:\n1. New Hire Overview\n2. Pre-Start Checklist (what YOU must do before day 1)\n3. Suggested First 1:1 Topics\n4. Flags and Action Items\n\nBe direct and practical. Plain text only."
+            }
+          ]
+        },
+        "options": {
+          "temperature": 0.3
+        }
+      },
+      "id": "node-009",
+      "name": "AI - Draft Manager Briefing",
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 1,
+      "position": [1520, 400],
+      "notes": "Generates a concise briefing note for the hiring manager."
+    },
+    {
+      "parameters": {
+        "sendTo": "={{ $('Enrich Profile with Role Data').first().json.manager_email || 'hr-team@company.com' }}",
+        "subject": "=Your New Team Member: {{ $('Enrich Profile with Role Data').first().json.full_name }} starts {{ $('Enrich Profile with Role Data').first().json.start_date }}",
+        "message": "=Hi {{ $('Enrich Profile with Role Data').first().json.manager_name }},\n\nYour new team member is confirmed and their onboarding is underway. Please see the briefing below.\n\n---\n\n{{ $input.first().json.choices[0].message.content }}\n\n---\n\nOnboarding Record ID: {{ $('Enrich Profile with Role Data').first().json.record_id }}\n\nIf you have any questions, please contact the HR team.\n\nBest regards,\nHR Onboarding Team",
+        "options": {}
+      },
+      "id": "node-010",
+      "name": "Gmail - Send Manager Briefing",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2,
+      "position": [1740, 400],
+      "notes": "Sends AI-generated briefing note to the hiring manager via Gmail."
+    },
+    {
+      "parameters": {
+        "sendTo": "={{ $('Enrich Profile with Role Data').first().json.personal_email }}",
+        "subject": "=Welcome to the team, {{ $('Enrich Profile with Role Data').first().json.full_name }}! Here's everything you need for Day 1",
+        "message": "=Hi {{ $('Enrich Profile with Role Data').first().json.full_name }},\n\nWe're excited to have you joining us!\n\nHere's your personalized onboarding plan to help you prepare:\n\n{{ JSON.stringify(JSON.parse($('AI - Generate Onboarding Plan').first().json.choices[0].message.content), null, 2) }}\n\n---\n\nYour start date: {{ $('Enrich Profile with Role Data').first().json.start_date }}\nYour manager: {{ $('Enrich Profile with Role Data').first().json.manager_name }}\nRecord ID: {{ $('Enrich Profile with Role Data').first().json.record_id }}\n\nIf you have any questions before your start date, please don't hesitate to reach out.\n\nLooking forward to having you on board!\n\nHR Onboarding Team",
+        "options": {}
+      },
+      "id": "node-011",
+      "name": "Gmail - Send Welcome Email",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2,
+      "position": [1740, 200],
+      "notes": "Sends personalized welcome email with onboarding plan to new hire."
+    },
+    {
+      "parameters": {
+        "channel": "#it-onboarding",
+        "text": "=🖥️ *New Hire IT Setup Required*\n\n*Name:* {{ $('Enrich Profile with Role Data').first().json.full_name }}\n*Role:* {{ $('Enrich Profile with Role Data').first().json.job_title }}\n*Department:* {{ $('Enrich Profile with Role Data').first().json.department }}\n*Start Date:* {{ $('Enrich Profile with Role Data').first().json.start_date }}\n*Location:* {{ $('Enrich Profile with Role Data').first().json.office_location }}\n*Employment Type:* {{ $('Enrich Profile with Role Data').first().json.employment_type }}\n\n*Systems Needed:* {{ $('Enrich Profile with Role Data').first().json.onboarding_track.tools.join(', ') }}\n\nRecord ID: {{ $('Enrich Profile with Role Data').first().json.record_id }}\n\nPlease complete all provisioning before the start date. ✅",
+        "options": {}
+      },
+      "id": "node-012",
+      "name": "Slack - IT Provisioning Alert",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2,
+      "position": [1740, 600],
+      "notes": "Notifies IT team in Slack with all provisioning requirements for the new hire."
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "baseId": "YOUR_AIRTABLE_BASE_ID",
+        "tableId": "Onboarding Records",
+        "id": "={{ $('Airtable - Create Onboarding Record').first().json.id }}",
+        "fields": {
+          "fieldMappings": [
+            { "fieldId": "Status", "fieldValue": "communications_sent" },
+            { "fieldId": "Welcome Email Sent", "fieldValue": "true" },
+            { "fieldId": "Manager Briefing Sent", "fieldValue": "true" },
+            { "fieldId": "IT Alert Sent", "fieldValue": "true" },
+            { "fieldId": "Completed At", "fieldValue": "={{ new Date().toISOString() }}" }
+          ]
+        }
+      },
+      "id": "node-013",
+      "name": "Airtable - Update Status to Complete",
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2,
+      "position": [1960, 400],
+      "notes": "Updates the onboarding record status after all communications are sent."
+    }
+  ],
+  "connections": {
+    "Webhook - New Hire Intake": {
+      "main": [[{ "node": "Validate Intake Record", "type": "main", "index": 0 }]]
+    },
+    "Validate Intake Record": {
+      "main": [[{ "node": "Route: Valid or Needs Review?", "type": "main", "index": 0 }]]
+    },
+    "Route: Valid or Needs Review?": {
+      "main": [
+        [{ "node": "AI - Extract and Normalize Fields", "type": "main", "index": 0 }],
+        [{ "node": "Slack - HR Review Alert", "type": "main", "index": 0 }]
+      ]
+    },
+    "AI - Extract and Normalize Fields": {
+      "main": [[{ "node": "Enrich Profile with Role Data", "type": "main", "index": 0 }]]
+    },
+    "Enrich Profile with Role Data": {
+      "main": [[{ "node": "Airtable - Create Onboarding Record", "type": "main", "index": 0 }]]
+    },
+    "Airtable - Create Onboarding Record": {
+      "main": [[
+        { "node": "AI - Generate Onboarding Plan", "type": "main", "index": 0 },
+        { "node": "AI - Draft Manager Briefing", "type": "main", "index": 0 }
+      ]]
+    },
+    "AI - Generate Onboarding Plan": {
+      "main": [[{ "node": "Gmail - Send Welcome Email", "type": "main", "index": 0 }]]
+    },
+    "AI - Draft Manager Briefing": {
+      "main": [[{ "node": "Gmail - Send Manager Briefing", "type": "main", "index": 0 }]]
+    },
+    "Gmail - Send Welcome Email": {
+      "main": [[{ "node": "Airtable - Update Status to Complete", "type": "main", "index": 0 }]]
+    },
+    "Gmail - Send Manager Briefing": {
+      "main": [[{ "node": "Slack - IT Provisioning Alert", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "meta": {
+    "description": "AI-powered onboarding automation workflow. Triggers on new hire intake, validates and extracts data via GPT-4o, enriches profile, creates Airtable record, generates personalized onboarding plan, and sends communications to new hire, manager, and IT team.",
+    "version": "1.0.0"
+  }
+}
